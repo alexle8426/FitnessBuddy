@@ -1,5 +1,6 @@
 import SwiftData
 import SwiftUI
+import UIKit
 
 struct MacroBreakdownSheet: View {
     let totals: MacroTargetSummary
@@ -64,14 +65,22 @@ struct MacroBreakdownSheet: View {
 struct ProfileSettingsSheet: View {
     @Environment(\.modelContext) private var modelContext
     @Query(sort: \MacroTarget.createdAt, order: .reverse) private var macroTargets: [MacroTarget]
+    @Query(sort: \UserProfile.createdAt, order: .reverse) private var userProfiles: [UserProfile]
+    @Query(sort: \FitnessGoal.createdAt, order: .reverse) private var fitnessGoals: [FitnessGoal]
     @AppStorage("aiEstimateBias") private var aiEstimateBias: Double = 0
 
     let target: MacroTargetSummary
+    @State private var goalType: GoalType = .loseWeight
+    @State private var currentWeight = ""
+    @State private var targetWeightChange = ""
+    @State private var targetDate = Calendar.current.date(byAdding: .month, value: 6, to: .now) ?? .now
+    @State private var weeklyWorkoutTarget = "4"
     @State private var calorieTarget = ""
     @State private var carbTarget = ""
     @State private var proteinTarget = ""
     @State private var fatTarget = ""
-    @State private var didLoadTargets = false
+    @State private var didLoadSettings = false
+    @State private var goalSaveMessage: String?
     @State private var saveMessage: String?
 
     private var biasLabel: String {
@@ -129,6 +138,18 @@ struct ProfileSettingsSheet: View {
                         .foregroundStyle(AppStyle.ink)
 
                     VStack(alignment: .leading, spacing: 18) {
+                        SettingsSectionTitle("Goal basics")
+
+                        goalBasicsEditor
+                    }
+
+                    VStack(alignment: .leading, spacing: 18) {
+                        SettingsSectionTitle("Macro plan")
+
+                        macroPlanEditor
+                    }
+
+                    VStack(alignment: .leading, spacing: 18) {
                         SettingsSectionTitle("AI estimates")
 
                         VStack(alignment: .leading, spacing: 14) {
@@ -161,12 +182,6 @@ struct ProfileSettingsSheet: View {
                     }
 
                     VStack(alignment: .leading, spacing: 18) {
-                        SettingsSectionTitle("Macro plan")
-
-                        macroPlanEditor
-                    }
-
-                    VStack(alignment: .leading, spacing: 18) {
                         SettingsSectionTitle("Later")
 
                         VStack(alignment: .leading, spacing: 10) {
@@ -190,8 +205,69 @@ struct ProfileSettingsSheet: View {
             }
         }
         .onAppear {
-            loadTargetsIfNeeded()
+            loadSettingsIfNeeded()
         }
+    }
+
+    private var goalBasicsEditor: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(spacing: 6) {
+                ForEach(GoalType.allCases) { goal in
+                    let isSelected = goalType == goal
+
+                    Button {
+                        goalType = goal
+                        goalSaveMessage = nil
+                    } label: {
+                        Text(goal.shortTitle)
+                            .font(.system(size: 13, weight: .black, design: .rounded))
+                            .foregroundStyle(isSelected ? .white : AppStyle.ink)
+                            .frame(maxWidth: .infinity)
+                            .frame(height: 36)
+                            .background(isSelected ? AppStyle.action : AppStyle.background.opacity(0.82))
+                            .clipShape(Capsule())
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+
+            LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 12) {
+                SettingsNumberField(title: "Current weight", value: $currentWeight, suffix: "lb", keyboardType: .decimalPad)
+                SettingsNumberField(title: "Target change", value: $targetWeightChange, suffix: "lb", keyboardType: .decimalPad)
+                SettingsNumberField(title: "Workouts / week", value: $weeklyWorkoutTarget, suffix: "x", keyboardType: .numberPad)
+            }
+
+            DatePicker("Target date", selection: $targetDate, displayedComponents: .date)
+                .font(.system(size: 16, weight: .bold, design: .rounded))
+                .foregroundStyle(AppStyle.ink)
+                .tint(AppStyle.action)
+                .padding(16)
+                .background(AppStyle.background.opacity(0.82))
+                .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+
+            if let goalSaveMessage {
+                Text(goalSaveMessage)
+                    .font(.system(size: 14, weight: .bold, design: .rounded))
+                    .foregroundStyle(AppStyle.action)
+            }
+
+            Button {
+                saveGoalBasics()
+            } label: {
+                Text("Save goal")
+                    .font(.system(size: 16, weight: .black, design: .rounded))
+                    .foregroundStyle(.white)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 46)
+                    .background(canSaveGoalBasics ? AppStyle.action : AppStyle.muted.opacity(0.4))
+                    .clipShape(Capsule())
+            }
+            .buttonStyle(.plain)
+            .disabled(!canSaveGoalBasics)
+        }
+        .padding(18)
+        .background(.white.opacity(0.88))
+        .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
     }
 
     private var macroPlanEditor: some View {
@@ -257,10 +333,36 @@ struct ProfileSettingsSheet: View {
         .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
     }
 
-    private func loadTargetsIfNeeded() {
-        guard !didLoadTargets else { return }
+    private var canSaveGoalBasics: Bool {
+        (Double(currentWeight) ?? 0) > 0 &&
+        (Double(targetWeightChange) ?? 0) >= 0 &&
+        (Int(weeklyWorkoutTarget) ?? 0) > 0
+    }
+
+    private func loadSettingsIfNeeded() {
+        guard !didLoadSettings else { return }
+        resetGoalDraftToActiveValues()
         resetDraftToActiveTarget()
-        didLoadTargets = true
+        didLoadSettings = true
+    }
+
+    private func resetGoalDraftToActiveValues() {
+        if let profile = userProfiles.first {
+            currentWeight = formatNumber(profile.weightValue)
+            weeklyWorkoutTarget = "\(profile.weeklyWorkoutTarget)"
+        } else {
+            currentWeight = "185"
+            weeklyWorkoutTarget = "4"
+        }
+
+        if let goal = fitnessGoals.first {
+            goalType = GoalType(rawValue: goal.goalTypeRawValue) ?? .loseWeight
+            targetWeightChange = goal.targetWeightChangeValue.map(formatNumber) ?? ""
+            targetDate = goal.targetDate ?? targetDate
+        } else {
+            goalType = .loseWeight
+            targetWeightChange = "10"
+        }
     }
 
     private func resetDraftToActiveTarget() {
@@ -300,6 +402,103 @@ struct ProfileSettingsSheet: View {
 
         try? modelContext.save()
         saveMessage = "Saved macro targets"
+    }
+
+    private func saveGoalBasics() {
+        guard
+            let weight = Double(currentWeight),
+            let workoutTarget = Int(weeklyWorkoutTarget)
+        else {
+            return
+        }
+
+        let change = Double(targetWeightChange)
+        let now = Date()
+
+        if let profile = userProfiles.first {
+            profile.weightValue = weight
+            profile.weightUnitRawValue = WeightUnit.pounds.rawValue
+            profile.metricSystemRawValue = MetricSystem.imperial.rawValue
+            profile.weeklyWorkoutTarget = workoutTarget
+            profile.updatedAt = now
+        } else {
+            modelContext.insert(
+                UserProfile(
+                    age: 28,
+                    sex: .preferNotToSay,
+                    heightValue: 70,
+                    heightUnit: .feetInches,
+                    weightValue: weight,
+                    weightUnit: .pounds,
+                    metricSystem: .imperial,
+                    activityLevel: .moderatelyActive,
+                    foodTrackingExperience: .beginner,
+                    gymExperience: .beginner,
+                    weeklyWorkoutTarget: workoutTarget,
+                    hasCompletedOnboarding: false,
+                    createdAt: now,
+                    updatedAt: now
+                )
+            )
+        }
+
+        if let goal = fitnessGoals.first {
+            goal.goalTypeRawValue = goalType.rawValue
+            goal.startingWeightValue = weight
+            goal.startingWeightUnitRawValue = WeightUnit.pounds.rawValue
+            goal.targetWeightChangeValue = change
+            goal.targetWeightChangeUnitRawValue = WeightUnit.pounds.rawValue
+            goal.targetDate = targetDate
+            goal.updatedAt = now
+        } else {
+            modelContext.insert(
+                FitnessGoal(
+                    goalType: goalType,
+                    startingWeightValue: weight,
+                    startingWeightUnit: .pounds,
+                    targetWeightChangeValue: change,
+                    targetWeightChangeUnit: .pounds,
+                    targetDate: targetDate,
+                    createdAt: now,
+                    updatedAt: now
+                )
+            )
+        }
+
+        try? modelContext.save()
+        goalSaveMessage = "Saved goal basics"
+    }
+
+    private func formatNumber(_ value: Double) -> String {
+        value.rounded() == value ? "\(Int(value))" : String(format: "%.1f", value)
+    }
+}
+
+struct SettingsNumberField: View {
+    let title: String
+    @Binding var value: String
+    let suffix: String
+    let keyboardType: UIKeyboardType
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title)
+                .font(.system(size: 13, weight: .bold, design: .rounded))
+                .foregroundStyle(AppStyle.muted)
+
+            HStack(alignment: .firstTextBaseline, spacing: 5) {
+                TextField("0", text: $value)
+                    .font(.system(size: 23, weight: .black, design: .rounded))
+                    .keyboardType(keyboardType)
+
+                Text(suffix)
+                    .font(.system(size: 14, weight: .bold, design: .rounded))
+                    .foregroundStyle(AppStyle.muted)
+            }
+        }
+        .padding(16)
+        .background(AppStyle.background.opacity(0.82))
+        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
     }
 }
 
@@ -518,5 +717,18 @@ struct MacroGoalSymbolView: View {
         }
         .foregroundStyle(color)
         .frame(width: 34)
+    }
+}
+
+private extension GoalType {
+    var shortTitle: String {
+        switch self {
+        case .loseWeight:
+            return "Lose"
+        case .buildMuscle:
+            return "Build"
+        case .bodyRecomposition:
+            return "Recomp"
+        }
     }
 }
